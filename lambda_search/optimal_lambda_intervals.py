@@ -17,8 +17,14 @@ from sklearn import linear_model
 
 
 def load_toy_data(exms=100, feats=10000, non_zeros=100, sigma=0.0, corr=0.0, seed = None):
-    # data generation, code taken from Adascreen implementation.
-
+    """
+    data generation, code taken from Adascreen implementation.
+    
+    Returns:
+        X: predictor data
+        y: regression targets
+        beta_star: true regression coefficients that were used to generate the data
+    """
     if seed != None:
         np.random.seed(seed)
     # Generate data similar as done in the Sasvi paper
@@ -27,9 +33,13 @@ def load_toy_data(exms=100, feats=10000, non_zeros=100, sigma=0.0, corr=0.0, see
         X[:,i] = (1.0-corr)*X[:,i] + corr*X[:,i-1]
     # (exms x features)
     beta_star = np.random.uniform(low=-1., high=+1., size=feats)
+    # set 'cut' number of coefficients to zero
     cut = feats-non_zeros
+    # random shuffling of indices
     inds = np.random.permutation(range(feats))
+    # set 'cut' random coefficients to zero
     beta_star[inds[:cut]] = 0.0
+    # compue the noisy responses for the regression
     y = X.dot(beta_star) + sigma*np.random.rand(exms)
     return X, y, beta_star
 
@@ -37,6 +47,14 @@ def load_toy_data(exms=100, feats=10000, non_zeros=100, sigma=0.0, corr=0.0, see
 def get_lambda_boundaries_DPP(X, y, beta, lambda_old, existing_bounds):
     """
     X is a assumed to have dimensions [samples, features].
+    
+    Args:
+        X: predictors
+        y: targets
+        beta: current estimate of coefficient vector
+        lambda_old: value of lambda corresponding to the estimate of the coefficient vector
+        existing_bounds: array of same size as beta, holding already known lambda boundaries 
+                        for coefficients of -1 if a coefficient still needs to be found
     """
 
     normY = np.linalg.norm(y, ord = 2)
@@ -111,6 +129,19 @@ def get_lambda_boundaries_EDPP2(X, y, beta, lambda_old, existing_bounds, lmax_x)
 def get_lambda_boundaries_EDPP(X, y, beta, lambda_old, existing_bounds, lmax_x):
     """
     Obtain lambda boundaries according to EDPP.
+
+    Args:
+        X: predictors
+        y: targets
+        beta: current estimate of coefficient vector
+        lambda_old: value of lambda corresponding to the estimate of the coefficient vector
+        existing_bounds: array of same size as beta, holding already known lambda boundaries 
+                        for coefficients of -1 if a coefficient still needs to be found
+
+        lmax_x: array or None, depending on whether this is the first screening or a subsequent screening.
+                Value needed for computation of v1 term. If it is the first screening, lmax_x corresponds
+                to lmax_x as returned by get_lambda_max()
+
     """
 
     #----------------------------------------------------------------------------------------------#
@@ -135,6 +166,9 @@ def get_lambda_boundaries_EDPP(X, y, beta, lambda_old, existing_bounds, lmax_x):
 
     # pre-compute feature independent terms
     theta = (y - X.dot(beta)) / lambda_old
+    
+
+    # definition of v1 depends of whether lambda_k = lambda_MAX
     if type(lmax_x) == np.ndarray:
         v1 = np.atleast_2d(lmax_x).T
     else:
@@ -175,6 +209,14 @@ def get_lambda_boundaries_EDPP(X, y, beta, lambda_old, existing_bounds, lmax_x):
 def get_lambda_boundaries_SAVE(X, y, beta, lambda_old, existing_bounds):
     """
     Obtain lambda boundaries accoring to SAVE rule
+    
+    Args:
+        X: predictors
+        y: targets
+        beta: current estimate of coefficient vector
+        lambda_old: value of lambda corresponding to the estimate of the coefficient vector
+        existing_bounds: array of same size as beta, holding already known lambda boundaries 
+                        for coefficients of -1 if a coefficient still needs to be found
     """
     y = y - X.dot(beta)
     normY = np.linalg.norm(y, ord = 2)
@@ -201,6 +243,14 @@ def get_lambda_boundaries_SAVE(X, y, beta, lambda_old, existing_bounds):
 def get_lambda_boundaries_STRONG(X, y, beta, lambda_old, existing_bounds):
     """
     Obtain lambda boundaries according to STRONG rule
+    
+    Args:
+        X: predictors
+        y: targets
+        beta: current estimate of coefficient vector
+        lambda_old: value of lambda corresponding to the estimate of the coefficient vector
+        existing_bounds: array of same size as beta, holding already known lambda boundaries 
+                        for coefficients of -1 if a coefficient still needs to be found
     """
     y = y - X.dot(beta)
     lambda_bound = []
@@ -250,7 +300,7 @@ def mse(y_pred, y_true):
     return np.mean((y_pred - y_true)**2)
 
 
-def createFigure(lambda_paths, lambda_grid, screenBounds, beta_star, errTrain, errVal, save=True):
+def createFigure(lambda_paths, lambda_grid, screenBounds, beta_star, errTrain, errVal, screenRule_name, save=True):
     """
     Creates a figure that show lambda paths and screening boundaries.
     Args:
@@ -307,7 +357,7 @@ def createFigure(lambda_paths, lambda_grid, screenBounds, beta_star, errTrain, e
     ax2.grid()
     ax2.legend(loc="best")
     if save:
-        plt.savefig("./lambda_path.pdf")
+        plt.savefig("./lambda_path_{}.pdf".format(screenRule_name))
         plt.close()
     else:
         plt.show()
@@ -335,6 +385,20 @@ def assert_boundary_validity(screenBounds, lambda_paths, lambda_grid):
 
 def run(nSamples, mFeatures, zNonZero, sigma, corr, valRatio, screenRule_name, gridSize, seed, save):
 
+    """
+    Args:
+        nSamples: number of training samples to be generated
+        mDeatures: number of features of generated data
+        zNonZero: number of true non-zero coefficients
+        sigma: std of noise for data generation
+        corr: correlation of features
+        valRatio: validation set size relative to training set size. 
+        screenRule_name: name of screening rule to be used
+        gridSize: number of lambdas for which the lasso solver is evaluated to compute the lambda paths
+        seed: random seed for data generation
+        save: if true, figure is save, else figure is shown
+    """
+
     # setup the chosen screening rule
     if screenRule_name == "dpp":
         screenRule = get_lambda_boundaries_DPP
@@ -345,36 +409,34 @@ def run(nSamples, mFeatures, zNonZero, sigma, corr, valRatio, screenRule_name, g
     elif screenRule_name == "edpp":
         screenRule = get_lambda_boundaries_EDPP
 
-    # create data
+    # create training and validation data
     Xall, yall, beta_star = load_toy_data(exms=nSamples+int(np.ceil(valRatio*nSamples)), feats=mFeatures, non_zeros=zNonZero, seed=seed, corr=corr, sigma=sigma)
     yall = np.atleast_2d(yall).T
+    
     # split into training and validation data
     order = np.random.permutation(Xall.shape[0])
-    X = Xall[order < nSamples]
-    y = yall[order < nSamples]
+    Xtrain = Xall[order < nSamples]
+    ytrain = yall[order < nSamples]
     Xval = Xall[order >= nSamples]
     yval = yall[order >= nSamples]
 
     # compute maximum meaningful lambda
-    lambda_max, lmax_ind, lmax_x = get_lambda_max(X, y)
-    LAMBDA_MAX = lambda_max
+    lambda_max, lmax_ind, lmax_x = get_lambda_max(Xtrain, ytrain)
     
-    print("LAMBDA_MAX = {}".format(LAMBDA_MAX))
+    print("lambda_max = {}".format(lambda_max))
 
-    # by def, the solution for lambda_max is beta = 0
-    beta = np.atleast_2d(np.zeros(X.shape[1])).T
+    # by definition the solution for lambda_max is beta = 0
+    beta = np.atleast_2d(np.zeros(Xtrain.shape[1])).T
 
-    all_lambda_new = -1 * np.ones([mFeatures])
-    all_lambda_new[lmax_ind] = LAMBDA_MAX
-    existing_bounds = np.ones(X.shape[1]) * -1.0
+    existing_bounds = np.ones(Xtrain.shape[1]) * -1.0
     # first boundary is already known by definition
-    existing_bounds[lmax_ind] = LAMBDA_MAX
+    existing_bounds[lmax_ind] = lambda_max
     
     # evaluate LASSO model a number of times to obtain the ground truth
     # boundaries of when betas turn non-zero
-    lambda_grid = np.linspace(0, LAMBDA_MAX, gridSize, endpoint = True)
+    lambda_grid = np.linspace(0, lambda_max, gridSize, endpoint = True)
     grid_res = lambda_grid[1] - lambda_grid[0]
-    lambda_grid = np.append(lambda_grid, LAMBDA_MAX+grid_res)
+    lambda_grid = np.append(lambda_grid, lambda_max+grid_res)
     lambda_paths = np.zeros([mFeatures, len(lambda_grid)])
 
     err_train, err_val = [], []
@@ -384,62 +446,65 @@ def run(nSamples, mFeatures, zNonZero, sigma, corr, valRatio, screenRule_name, g
             clf = linear_model.LinearRegression(fit_intercept=False)
         else:
             clf = linear_model.Lasso(alpha=lmda, fit_intercept = False, tol = 1e-9, max_iter=1e6)
-        clf.fit(X*np.sqrt(nSamples), y*np.sqrt(nSamples))
+        clf.fit(Xtrain*np.sqrt(nSamples), ytrain*np.sqrt(nSamples))
         # save solution
         lambda_paths[:, i] = clf.coef_
         # compute error
-        err_train.append(mse(clf.predict(X*np.sqrt(X.shape[0])), y*np.sqrt(y.shape[0])))
+        err_train.append(mse(clf.predict(Xtrain*np.sqrt(Xtrain.shape[0])), ytrain*np.sqrt(ytrain.shape[0])))
         err_val.append(mse(clf.predict(Xval*np.sqrt(Xval.shape[0])), yval*np.sqrt(yval.shape[0])))
 
-
-    
     # compute screening boundaries for all features
     all_gaps = -1 * np.ones([mFeatures, mFeatures])
+    # set of indices for which a lambda boundary needs to be determined
     idcs = {x for x in np.arange(mFeatures)} - {lmax_ind}
     for step in range(mFeatures - 1):
         # compute next boundary
         if "edpp" in screenRule_name:
-            lambda_boundaries, gaps = screenRule(X, y, beta, lambda_max, existing_bounds, lmax_x if step==0 else None)
+            lambda_boundaries, gaps = screenRule(Xtrain, ytrain, beta, lambda_max, existing_bounds, lmax_x if step==0 else None)
         else:
-            lambda_boundaries = screenRule(X, y, beta, lambda_max, existing_bounds)
+            lambda_boundaries = screenRule(Xtrain, ytrain, beta, lambda_max, existing_bounds)
 
         # only update screening bound for betas for which no bound has been found yet
         #idcs = np.where(existing_bounds == -1.0)[0]
         if "edpp" in screenRule_name:
             all_gaps[step] = gaps
+        # select coefficient corresponding to largest lambda
         selected = list(idcs)[np.argmax(lambda_boundaries[list(idcs)])]
+        # get that value of lambda
         lambda_new = np.squeeze(lambda_boundaries[selected])
+        # update lambda boundaries
         existing_bounds[selected] = lambda_new
-        all_lambda_new[selected] = lambda_new
+        # update set of coefficients for which to search a lambda boundary
         idcs = idcs - {selected}
         # fit new LASSO with new lambda
         clf = linear_model.Lasso(alpha=lambda_new, fit_intercept = False)
         # the LASSO objective in scikit learn differs by a factor of n:
         # 1/(2n) L2-term + lambda * L1-term. 
-        clf.fit(X*np.sqrt(X.shape[0]), y*np.sqrt(y.shape[0]))
+        clf.fit(Xtrain*np.sqrt(Xtrain.shape[0]), ytrain*np.sqrt(ytrain.shape[0]))
 
         # update lambda and beta
         lambda_max = lambda_new
         beta = np.atleast_2d(clf.coef_).T
     
     # visualize results
-    assert_boundary_validity(all_lambda_new, lambda_paths, lambda_grid)
-    createFigure(lambda_paths, lambda_grid, all_lambda_new, beta_star, err_train, err_val, save)
+    assert_boundary_validity(existing_bounds, lambda_paths, lambda_grid)
+    createFigure(lambda_paths, lambda_grid, existing_bounds, beta_star, err_train, err_val, screenRule_name, save)
+
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n", help="number of training samples", default="20", type=int)
-    parser.add_argument("-m", help="number of features", default="10", type=int)
-    parser.add_argument("-nz", help=r"percentage of features whose coefficient $\beta != 0$", default=0, type=int)
-    parser.add_argument("-s", help="std. of noise in generated data", default=0.0, type=float)
+    parser.add_argument("-n", help="number of training samples", default=100, type=int)
+    parser.add_argument("-m", help="number of features", default=10, type=int)
+    parser.add_argument("-nz", help="number of features whose true coefficient are non-zero", default=5, type=int)
+    parser.add_argument("-s", help="std. of noise in generated data", default=0, type=float)
     parser.add_argument("-c", help="correlation of features in generated data", default=0.0, type=float)
     parser.add_argument("-r", help="screening rule", default="dpp", choices=["dpp", "save", "strong", "edpp"], type=str)
     parser.add_argument("-g", help="number of lambdas for which the model is fit to obtain the \
-                                    ground truth solution of (non-)zero betas", default=100, type=int)
-    parser.add_argument("-v", help="number of validation samples in relation to training samples", default=1.0, type=float)
-    parser.add_argument("--seed", type=int, default=13)
-    parser.add_argument("--save", help="IF True figure is saved, else figure is shown", default=False, action="store_true")
+                                    ground truth solution of (non-)zero coefficients", default=100, type=int)
+    parser.add_argument("-v", help="validation set size relative to training set size, where 1.0 means that both sets have equal size", default=1.0, type=float)
+    parser.add_argument("--seed", help="seed for data generation to make results reproducible", type=int, default=13)
+    parser.add_argument("--save", help="If True figure is saved, else figure is shown", default=False, action="store_true")
     args = parser.parse_args()
 
     # Call main routine
