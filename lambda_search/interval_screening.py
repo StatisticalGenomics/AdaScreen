@@ -42,16 +42,10 @@ def normalize_data(X=None, y=None, mean_free=True):
     print('Done.')
     return (X, y)
 
-def load_toy_data(exms=100, feats=10, non_zeros=100, sigma=0.0, corr=0.0, seed = None):
+def load_toy_data(exms=100, feats=10, non_zeros=5, sigma=0.0, corr=0.0, seed = None):
     # data generation, code taken from Adascreen implementation.
-    sigma = 0
-    corr = 0
-    non_zeros = 5
-    exms = 100
-    feats=20
-    np.random.seed(13)
-    #if seed != None:
-    #    np.random.seed(seed)
+    if seed != None:
+        np.random.seed(seed)
     # Generate data similar as done in the Sasvi paper
     X = np.random.uniform(low=0.,high=+1., size=(exms, feats))
     for i in range(1,feats):
@@ -65,7 +59,7 @@ def load_toy_data(exms=100, feats=10, non_zeros=100, sigma=0.0, corr=0.0, seed =
     return X, y, beta_star
 
 
-def screen_DPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy, lmax_x):
+def screen_DPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy):
     """
     Screening according to Strong rule.
     Args:
@@ -86,23 +80,18 @@ def screen_DPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy, lmax_x)
     """
     # loop over features
 
+    X_beta = X[:,nzIdcs].dot(beta[nzIdcs])
+
     for idx, feat in enumerate(X.T):
         x = np.atleast_2d(feat)
         xy = normX[idx] * normy
-        # compute lambda for which lhs and rhs of Strong rule are equal
-        #X_beta = X.dot(beta)
-        if len(nzIdcs) > 0:
-            X_beta = X[:,nzIdcs].dot(beta[nzIdcs])
-        else:
-            X_beta = 0
+        # compute lambda for which lhs and rhs of DPP rule are equal
         bound = (l0 * xy) / (l0 - np.abs(x.dot(y - X_beta)) + xy)
         # if bound is smaller than current value of l, update bound
-        #print("bound={}, l={}".format(bound, l))
         existing_bounds[idx] = bound
         
     # get idcs of features that cannot be discarded
-    nzIdcs = np.where(existing_bounds >= l)[0]
-    print("nzIdcs", nzIdcs)
+    nzIdcs = l < existing_bounds 
     return (nzIdcs, existing_bounds)
 
 
@@ -135,7 +124,7 @@ def get_lambda_boundaries_DPP(X, y, beta, lambda_old, existing_bounds):
 
 
 
-def screen_EDPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy, lmax_x):
+def screen_EDPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, lmax_x):
     """
     Screening according to EDPP.
     Args:
@@ -174,17 +163,15 @@ def screen_EDPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy, lmax_x
     #----------------------------------------------------------------------------------------------#
 
     # pre-compute feature independent terms
-    if len(nzIdcs) > 0:
-        X_beta = X[:,nzIdcs].dot(beta[nzIdcs])
-    else:
-        X_beta = 0
-
+    X_beta = X[:,nzIdcs].dot(beta[nzIdcs])
     theta = (y - X_beta) / l0
 
+    # definition of v1 depends on whether lambda == LAMBDA_MAX, see paper
     if type(lmax_x) == np.ndarray:
         v1 = np.atleast_2d(lmax_x).T
     else:
         v1 = y/l0 - theta
+
     sqnorm_v1 = np.linalg.norm(v1, ord=2)**2
     # terms k1 and k2 summarizes v1, v2 and v3 with lambda_k factored out
     k1 = y - v1.T.dot(y) * v1/(sqnorm_v1)
@@ -219,8 +206,7 @@ def screen_EDPP(X, y, beta, l0, l, existing_bounds, nzIdcs, normX, normy, lmax_x
             # the max of l0 and the previously computed boundary.
             existing_bounds[idx] = np.max([l0, existing_bounds[idx]])
 
-    nzIdcs = np.where(existing_bounds >= l)[0]
-    #print(len(nzIdcs))
+    nzIdcs = l < existing_bounds
     return (nzIdcs, existing_bounds)
 
 
@@ -265,7 +251,7 @@ def mse(y_pred, y_true):
 
 
 
-def assert_boundary_validity(screenBounds, lambda_paths, lambda_grid):
+def assert_boundary_validity_OLD(screenBounds, lambda_paths, lambda_grid):
     """
     Function to assert that no screening boundaries exceeds the value of lambda for which a coefficient becomes non-zero.
     Args:
@@ -284,52 +270,91 @@ def assert_boundary_validity(screenBounds, lambda_paths, lambda_grid):
     return
 
 
-def follow_lambda_path2(X, y, lambda_path, normy, lmax_x, screen, debug=True):
+def assert_boundary_validity(nonZero_path, coef_path):
+    returnFlag = True
+    for idx, (nonZero_indicator, beta) in enumerate(zip(nonZero_path, coef_path)):
+        # which indices are zero according to screening?
+        idcsShouldBeZero = set(np.where(nonZero_indicator == 0)[0])
+        # which coefficients are nonzero?
+        idcsAreNotZero = set(np.where(beta != 0)[0])
+        # there should be no overlap
+        if len(list(idcsAreNotZero.intersection(idcsShouldBeZero))) != 0:
+            print("boundary for feature {} is not valid".format(idx))
+            returnFlag = False
+    return returnFlag
 
+
+def follow_lambda_path(X, y, Xval, yval, lambda_path, lmax_x, screen, screenRule_name, screen_always=False):
+
+    # arrays to store training and validation error
+    err_train = -1 * np.ones_like(lambda_path)
+    err_val = -1 * np.ones_like(lambda_path)
+    # list to store screening positions
     screening_positions = []
-
+    # precompute norm of feature vectors
     normX = np.linalg.norm(X, ord=2, axis=0)
+    # compensation factor because mathematical definition of lasso problem differs between screening literature and scikit learn
     sqrt_n = np.sqrt(X.shape[0])
+    # norm of response vector (not needed for edpp)
+    if not screenRule_name == "edpp":
+        normy = np.linalg.norm(y, ord=2)
 
+    # array to store boolean masks indicating which coefficients are non-zero according to screening rule
     nonZero_path = np.zeros([len(lambda_path), X.shape[1]])
+    # array to store true coefficient vectors
     coef_path = np.zeros([len(lambda_path), X.shape[1]])
 
+    # walk along given lambda path
     for idx, lmda in enumerate(lambda_path):
 
+        # first iteration, lambda == LAMBDA_MAX
         if idx == 0:
             # set up model
             model = linear_model.Lasso(alpha=lmda, fit_intercept=False)
             model.fit(X*sqrt_n, y*sqrt_n)
             # check that all coefs are zero for lambda == lambda_max
-            assert(np.sum(np.abs(model.coef_)) == 0), "beta for lambda_max should be zero but np.sum(np.abs(beta)) = {}".format(np.sum(np.abs(model.coef_)))
+            assert(np.isclose(np.sum(np.abs(model.coef_)), 0)), "beta for lambda_max should be zero but np.sum(np.abs(beta)) = {}".format(np.sum(np.abs(model.coef_)))
             coefs_full = np.zeros([X.shape[1]])
             existing_bounds = lambda_path[0] * np.ones(X.shape[1])
-            nzIdcs = np.array([])
+            # boolean mask indicating which coefficients are non zero
+            nzIdcs = np.array([False]*X.shape[1])
+            # next smaller value of lambda for which a new feature will be in the active set
             next_lmda_bound = lmda
+            # last value of lambda used for screening
             l0 = lmda
+            # model prediction
+            y_pred_train = model.predict(X*np.sqrt(X.shape[0]))
+            y_pred_val = model.predict(Xval*np.sqrt(Xval.shape[0]))
+
+
         else:
-            if lmda < next_lmda_bound:
+            # subsequent iterations
+            if screen_always or lmda < next_lmda_bound:
+                # store position where screening was performed
                 screening_positions.append(lmda)
                 # screen
-                if idx == 1:
-                    v1 = lmax_x
+                if screenRule_name == "edpp":
+                    # special case because edpp needs different arguments
+                    if idx == 1:
+                        v1 = lmax_x
+                    else:
+                        v1 = None
+                    nzIdcs, existing_bounds = screen(X, y, np.atleast_2d(coefs_full).T, l0, lmda, existing_bounds, nzIdcs, normX, v1)
                 else:
-                    v1 = None
+                    nzIdcs, existing_bounds = screen(X, y, np.atleast_2d(coefs_full).T, l0, lmda, existing_bounds, nzIdcs, normX, normy)
 
-                #ToDo: allow different screening rules
-
-                nzIdcs, existing_bounds = screen_EDPP(X, y, np.atleast_2d(coefs_full).T, l0, lmda, existing_bounds, nzIdcs, normX, normy, v1)
+                # compute next smaller value of lambda for which a new feature will be in the active set
                 bound_candidates = existing_bounds[np.where(existing_bounds<lmda)[0]]
                 if len(bound_candidates) > 0:
                     next_lmda_bound = np.max(bound_candidates)
                 
-
             # solve lasso problem with current value of lambda
             model.alpha = lmda
-            # only use active set of features for lasso fitting
+            # fit model using active set only
             model.fit(X[:,nzIdcs]*sqrt_n, y*sqrt_n)
             # keep record of entire coefficient vector
             coefs_full = np.zeros([X.shape[1]])
+            # store coefficients
             coefs_full[nzIdcs] = model.coef_
             # what are the weights of each feature?
             coef_path[idx] = coefs_full
@@ -337,49 +362,94 @@ def follow_lambda_path2(X, y, lambda_path, normy, lmax_x, screen, debug=True):
             nonZero_path[idx] = existing_bounds > lmda
             # update lambda_0 as used by screening rules
             l0 = lmda
-    return nonZero_path, coef_path, screening_positions
+
+            # compute training
+            y_pred_train = model.predict(X[:,nzIdcs]*np.sqrt(X.shape[0]))
+            y_pred_val = model.predict(Xval[:,nzIdcs]*np.sqrt(Xval.shape[0]))
+
+        # compute training error
+        err_train[idx] = mse(y_pred_train, y*np.sqrt(y.shape[0]))
+        # compute validation error
+        err_val[idx] = mse(y_pred_val, yval*np.sqrt(yval.shape[0]))
+
+    return nonZero_path, coef_path, screening_positions, err_train, err_val
 
 
 
 
-def run(nSamples, mFeatures, nZeros, sigma, corr, valRatio, screenRule_name, gridSize, seed, save, steps=100):
+def run(nSamples, mFeatures, n_nonZeros, sigma, corr, valRatio, screenRule_name, gridSize, seed, save, screen_always):
 
     print("Screening with {}".format(screenRule_name))
 
-    # create data
-    X, y, beta_star = load_toy_data(exms=nSamples, feats=mFeatures, non_zeros=mFeatures-nZeros, seed=seed, corr=corr, sigma=sigma)
-    #(X, y) = normalize_data(X, y, mean_free=True)
-    y = np.atleast_2d(y).T
+    Xall, yall, beta_star = load_toy_data(exms=nSamples+int(np.ceil(valRatio*nSamples)), feats=mFeatures, non_zeros=n_nonZeros, seed=seed, corr=corr, sigma=sigma)
+    yall = np.atleast_2d(yall).T
+    # split into training and validation data
+    order = np.random.permutation(Xall.shape[0])
+    X = Xall[order < nSamples]
+    y = yall[order < nSamples]
+    Xval = Xall[order >= nSamples]
+    yval = yall[order >= nSamples]
 
     # compute maximum meaningful value of lambda
     LAMBDA_MAX, lmax_ind, lmax_x = get_lambda_max(X, y)
-
     print("LAMBDA_MAX = {}".format(LAMBDA_MAX))
-
     # by def, the solution for lambda_max is beta = 0
     beta = np.atleast_2d(np.zeros(X.shape[1])).T
-
-    lambda_path = get_plain_path(scale="linear", lb=0, ub=LAMBDA_MAX, steps=100)
-
-    running_time = 0
+    # compute lambda path at which to fit model
+    lambda_path = get_plain_path(scale="linear", lb=0, ub=LAMBDA_MAX, steps=gridSize)
+    # select screening rule
     if screenRule_name == "dpp":
         screen = screen_DPP
-        start_time = timeit.default_timer()
-        normy = np.linalg.norm(y, ord=2)
-        t = timeit.default_timer() - start_time
-        running_time += t
     elif screenRule_name == "edpp":
         screen = screen_EDPP
-        normy = None
     else:
         raise NotImplementedError("{} is not implemented.".format(screenRule_name))
 
-    nonZero_path, coef_path, screening_positions = follow_lambda_path2(X, y, lambda_path, normy, lmax_x, screen, debug=True)
+    start_time_complete = timeit.default_timer()
+    nonZero_path, coef_path, screening_positions, err_train, err_val = follow_lambda_path(X, y, Xval, yval, lambda_path, lmax_x, screen, screenRule_name, screen_always)
+    duration_complete = timeit.default_timer() - start_time_complete
 
-    fig, ax = plt.subplots(2,1,figsize=(8,8))
-    ax[0].plot(lambda_path, nonZero_path)
-    ax[1].plot(lambda_path, coef_path)
-    ax[1].plot(screening_positions, np.zeros_like(screening_positions), "ro", ms=5.0)
+    print("Duration: {}".format(duration_complete))
+    print("number of screenings: {}".format(len(screening_positions)))
+
+    if assert_boundary_validity(nonZero_path, coef_path):
+        print("All boundaries are valid.")
+
+
+    # visualize
+    fig = plt.figure(figsize=(12,8))
+    ax1 = plt.subplot2grid((3,1), (0,0), rowspan=2)
+    ax2 = plt.subplot2grid((3,1), (2,0))
+    # resetting the color cycle to default ensures that corresponding coefficient path and lambda boundaries have the same color
+    ax1.set_prop_cycle(None)
+    # plot boundaries
+    ax1.plot(lambda_path, np.max(np.abs(coef_path)) * nonZero_path, "--", label=r"$\lambda$ boundary")
+    # resetting the color cycle to default ensures that corresponding coefficient path and lambda boundaries have the same color
+    ax1.set_prop_cycle(None)
+    # plot coefficients
+    ax1.plot(lambda_path, coef_path, label=r"$\beta_k$")
+    # plot screening positions
+    ax1.plot(screening_positions, np.zeros_like(screening_positions), "ro", ms=3.0, label="screening position")
+    ax1.set_xlabel(r"$\lambda$")
+    ax1.set_ylabel(r"$\beta^{(i)}$")
+    ylim = 1.05 * np.max(np.abs(coef_path))
+    xlims = [-lambda_path[0]*0.05, lambda_path[0]*1.05]
+    ax1.set_xlim(xlims)
+    ax1.set_ylim([-ylim, ylim])
+    # remove duplicates in legend
+    handles, labels = ax1.get_legend_handles_labels()
+    labels, idcs = np.unique(labels, return_index=True)
+    handles = [handles[i] for i in idcs]
+    ax1.legend(handles, labels, loc="best")
+    ax1.set_title(screenRule_name)
+
+    ax2.plot(lambda_path, err_train, ".--", label="training error")
+    ax2.plot(lambda_path, err_val, ".--", label="validation error")
+    ax2.set_xlabel(r"$\lambda$")
+    ax2.set_ylabel("Error")
+    ax2.set_xlim(xlims)
+    ax2.set_ylim([0, np.max([np.max(err_train), np.max(err_val)])])
+    ax2.legend()
     plt.tight_layout()
     plt.show()
     
@@ -387,21 +457,24 @@ def run(nSamples, mFeatures, nZeros, sigma, corr, valRatio, screenRule_name, gri
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n", help="number of training samples", default="20", type=int)
-    parser.add_argument("-m", help="number of features", default="10", type=int)
-    parser.add_argument("-z", help=r"number of features whose coefficient $\beta = 0$", default=0, type=int)
+    parser.add_argument("-n", help="number of training samples", default=20, type=int)
+    parser.add_argument("-m", help="number of features", default=10, type=int)
+    parser.add_argument("-z", help=r"number of features whose coefficient $\beta != 0$", default=5, type=int)
     parser.add_argument("-s", help="std. of noise in generated data", default=0.0, type=float)
     parser.add_argument("-c", help="correlation of features in generated data", default=0.0, type=float)
-    parser.add_argument("-r", help="screening rule", default="dpp", choices=["dpp", "edpp"], type=str)
+    parser.add_argument("-r", help="screening rule", default="edpp", choices=["dpp", "edpp"], type=str)
     parser.add_argument("-g", help="number of lambdas for which the model is fit to obtain the \
                                     ground truth solution of (non-)zero betas", default=100, type=int)
     parser.add_argument("-v", help="number of validation samples relative to training samples", default=1.0, type=float)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--save", help="If True figure is saved, else figure is shown", default=False, action="store_true")
+    parser.add_argument("--screen_always", default=False, action="store_true", help="If True, screening is performed \
+                                                                                in every iteration, if False, screening is skipped \
+                                                                                as long as no new feature will be in the active set.")
     args = parser.parse_args()
 
     # Call main routine
-    run(args.n, args.m, args.z, args.s, args.c, args.v, args.r, args.g, args.seed, args.save)
+    run(args.n, args.m, args.z, args.s, args.c, args.v, args.r, args.g, args.seed, args.save, args.screen_always)
 
 
 
